@@ -1,3 +1,4 @@
 {
-    "defaultPrefix": "-"
+    "defaultPrefix": "-",
+    "embedColor": "#FFEEDD"
 }

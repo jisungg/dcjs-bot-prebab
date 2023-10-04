@@ -11,6 +11,7 @@ const { Connection, Model, connect, connection, set } = require("mongoose");
 const db = connection;
 
 const Logger = require("../utils/logger");
+const Util = require("../utils/utils");
 
 /**
  * @class CustomClient
@@ -90,8 +91,9 @@ class CustomClient extends Client {
      */
     this.gloablCooldowns = new Collection();
 
-    /*  LOGGER  */
+    /*  UTILS  */
     this.logger = Logger;
+    this.utils = Util;
 
     /*  DB CONNECTION  */
 
@@ -132,7 +134,6 @@ class CustomClient extends Client {
   }
 
   /*  DATABASE/MONGOOSE FUNCTIONS */
-
   /**
    * Get Guild Information
    * @param {String} guildID
@@ -172,7 +173,7 @@ class CustomClient extends Client {
   /**
    * @returns {Promise<Connection>}
    */
-  async loadDatabase() {
+  loadDatabase() {
     set("strictQuery", true);
     // @ts-ignore
     return connect(process.env.MONGO, {
@@ -181,9 +182,16 @@ class CustomClient extends Client {
     });
   }
 
+  /**
+   * Fetches the blacklist
+   */
   async blacklistFetch() {
-    const blacklist = await this.DBConfig.findByIdAndUpdate("blacklist", {}, { new: true, upsert: true, setDefaultsOnInsert: true}).then((doc) => {
-        return JSON.parse(JSON.stringify(doc));
+    const blacklist = await this.DBConfig.findByIdAndUpdate(
+      "blacklist",
+      {},
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    ).then((doc) => {
+      return JSON.parse(JSON.stringify(doc));
     });
     this.blacklistCache = new Set(blacklist.blacklisted);
   }
@@ -198,6 +206,7 @@ class CustomClient extends Client {
     return time[0] * 1e9 + time[1] * 1e-6;
   }
 
+  /*  EMOTES FUNCTION  */
   /**
    * @param {import('discord.js').Guild} guild
    */
@@ -229,6 +238,331 @@ class CustomClient extends Client {
         });
       });
     }
+  }
+
+  /*  COOLDOWNS  */
+  /**
+   * @param {import('../structures/client').Command} command - The command to set a cooldown for
+   * @param {import('discord.js').Message} message - the message in the guild the command is executed from
+   * @returns {number | undefined}
+   */
+  getCooldown(command, message) {
+    const guildID = message.guildId;
+    if (!guildID) {
+      this.logger.warn(
+        `Wasn't able to get cooldown due to error fetching guild ID from message.`,
+        __dirname,
+        { tag: "COOLDOWN" }
+      );
+      return;
+    }
+    const guildData = this.guildInfoCache.get(guildID);
+    let cd = command.cooldown;
+
+    if (
+      guildData?.commandCooldowns &&
+      guildData.commandCooldowns[command.name]
+    ) {
+      let roles = Object.keys(guildData.commandCooldowns[command.name]);
+      let highestRole = message.member?.roles.cache
+        .filter((role) => roles.includes(role.id))
+        .sort((a, b) => b.position - a.position)
+        .first();
+      if (highestRole)
+        cd = guildData.commandCooldowns[command.name][highestRole.id] / 1000;
+    }
+
+    return cd;
+  }
+
+  /**
+   * @param {import('../structures/Client').Command} command
+   * @param {import('discord.js').Message} message
+   */
+  async setCooldown(command, message) {
+    const cd = await this.getCooldown(command, message);
+
+    if (!cd) return;
+
+    let cooldowns;
+    if (
+      typeof command.globalCooldown === "undefined" ||
+      command.globalCooldown
+    ) {
+      if (!this.gloablCooldowns.has(command.name))
+        this.gloablCooldowns.set(command.name, new Collection());
+      cooldowns = this.gloablCooldowns;
+    } else {
+      const guildID = message.guildId;
+      if (!guildID) {
+        this.logger.error(
+          `Error setting cooldowns for command: ${command.name}.`,
+          __dirname,
+          { tag: "COOLDOWN" }
+        );
+        return;
+      }
+      if (!this.serverCooldowns.has(guildID))
+        this.serverCooldowns.set(guildID, new Collection());
+      cooldowns = this.serverCooldowns.get(guildID);
+      if (!cooldowns) {
+        this.logger.error(
+          `Error fetching server cooldowns for guild: ${guildID}.`,
+          __dirname,
+          { tag: "COOLDOWN" }
+        );
+        return;
+      }
+      if (!cooldowns.has(command.name))
+        cooldowns.set(command.name, new Collection());
+    }
+
+    const now = Date.now();
+    const timestamps = cooldowns.get(command.name);
+    const cooldownAmount = cd * 1000;
+
+    if (!timestamps) {
+      this.logger.error(
+        `Error getting cooldowns from command: ${command.name}.`,
+        __dirname,
+        { tag: "COOLDOWN" }
+      );
+      return;
+    }
+
+    timestamps.set(message.author.id, now);
+    setTimeout(() => timestamps.delete(message.author.id), cooldownAmount);
+  }
+
+  /*  COMMAND HANDLING  */
+  /**
+   * Check if the user has passed in the proper arguments for a command
+   * @param {import('discord.js').Message} message
+   * @param {string[]} msgArgs - The arguments given by the user
+   * @param {Arguments} expectedArgs - The expected arguments for the command
+   * @returns {Flags} The arguments mapped by their ID's if all the arguments were as expected, else, returns `undefined/false`
+   */
+  processArguments(message, msgArgs, expectedArgs) {
+    let counter = 0;
+    let amount, num, role, member, channel, attach, time;
+    let flags = {};
+
+    for (const argument of expectedArgs) {
+      //@ts-ignore
+      amount = argument.amount && argument.amount > 1 ? argument.amount : 1;
+
+      for (let i = 0; i < amount; i++) {
+        if (!msgArgs[counter] && argument.type !== "ATTACHMENT") {
+          //@ts-ignore
+          if (argument.optional) return flags;
+          //@ts-ignore
+          return { invalid: true, prompt: argument.prompt };
+        }
+
+        switch (argument.type) {
+          case "SOMETHING":
+            if (
+              argument.words &&
+              !argument.words.includes(msgArgs[counter].toLowerCase())
+            )
+              return { invalid: true, prompt: argument.prompt };
+            else if (argument.regexp && !argument.regexp.test(msgArgs[counter]))
+              return { invalid: true, prompt: argument.prompt };
+
+            if (amount == 1) flags[argument.id] = msgArgs[counter];
+            else if (flags[argument.id])
+              flags[argument.id].push(msgArgs[counter]);
+            else flags[argument.id] = [msgArgs[counter]];
+            break;
+
+          case "NUMBER":
+            num = Number(msgArgs[counter]);
+            if (isNaN(num)) return { invalid: true, prompt: argument.prompt };
+
+            if (argument.min && argument.min > num)
+              return { invalid: true, prompt: argument.prompt };
+
+            if (argument.max && argument.max < num)
+              return { invalid: true, prompt: argument.prompt };
+
+            //@ts-ignore
+            if (argument.toInteger) num = parseInt(num);
+
+            if (amount == 1) flags[argument.id] = num;
+            else if (flags[argument.id]) flags[argument.id].push(num);
+            else flags[argument.id] = [num];
+            break;
+
+          case "CHANNEL":
+            // @ts-ignore
+            if (
+              msgArgs[counter].startsWith("<#") &&
+              msgArgs[counter].endsWith(">")
+            )
+              // @ts-ignore
+              channel = message.guild.channels.cache.get(
+                msgArgs[counter].slice(2, -1)
+              );
+            // @ts-ignore
+            else channel = message.guild.channels.cache.get(msgArgs[counter]);
+
+            if (!channel) return { invalid: true, prompt: argument.prompt };
+
+            // @ts-ignore
+            if (
+              argument.channelTypes &&
+              // @ts-ignore
+              !argument.channelTypes.includes(channel.type)
+            )
+              return { invalid: true, prompt: argument.prompt };
+
+            if (amount == 1) flags[argument.id] = channel;
+            else if (flags[argument.id]) flags[argument.id].push(channel);
+            else flags[argument.id] = [channel];
+            break;
+
+          case "ROLE":
+            // @ts-ignore
+            if (
+              msgArgs[counter].startsWith("<@&") &&
+              msgArgs[counter].endsWith(">")
+            )
+              // @ts-ignore
+              role = message.guild.roles.cache.get(
+                msgArgs[counter].slice(3, -1)
+              );
+            // @ts-ignore
+            else role = message.guild.roles.cache.get(msgArgs[counter]);
+
+            if (!role) return { invalid: true, prompt: argument.prompt };
+
+            if (argument.notBot && role.managed)
+              return { invalid: true, prompt: argument.prompt };
+
+            if (amount == 1) flags[argument.id] = role;
+            else if (flags[argument.id]) flags[argument.id].push(role);
+            else flags[argument.id] = [role];
+            break;
+
+          case "AUTHOR_OR_MEMBER":
+            // @ts-ignore
+            if (
+              msgArgs[counter] &&
+              (msgArgs[counter].startsWith("<@") ||
+                (msgArgs[counter].startsWith("<@!") &&
+                  msgArgs[counter].endsWith(">")))
+            )
+              // @ts-ignore
+              member = message.guild.member(
+                msgArgs[counter]
+                  .replace("<@", "")
+                  .replace("!", "")
+                  .replace(">", "")
+              );
+            // @ts-ignore
+            else member = message.guild.member(msgArgs[counter]);
+
+            if (!member) flags[argument.id] = message.member;
+            else flags[argument.id] = member;
+
+            if (argument.toUser) flags[argument.id] = flags[argument.id].user;
+            break;
+
+          case "MEMBER":
+            // @ts-ignore
+            if (
+              msgArgs[counter].startsWith("<@") ||
+              (msgArgs[counter].startsWith("<@!") &&
+                msgArgs[counter].endsWith(">"))
+            )
+              // @ts-ignore
+              member = message.guild.member(
+                msgArgs[counter]
+                  .replace("<@", "")
+                  .replace("!", "")
+                  .replace(">", "")
+              );
+            // @ts-ignore
+            else member = message.guild.member(msgArgs[counter]);
+
+            if (!member) return { invalid: true, prompt: argument.prompt };
+            else {
+              if (argument.notBot && member.user.bot)
+                return { invalid: true, prompt: argument.prompt };
+
+              if (argument.notSelf && member.id === message.author.id)
+                return { invalid: true, prompt: argument.prompt };
+
+              if (argument.toUser) member = member.user;
+
+              if (amount == 1) flags[argument.id] = member;
+              else if (flags[argument.id]) flags[argument.id].push(member);
+              else flags[argument.id] = [member];
+            }
+            break;
+
+          case "ATTACHMENT":
+            if (message.attachments.size === 0)
+              return { invalid: true, prompt: argument.prompt };
+
+            attach = message.attachments.filter((a) => {
+              let accepted = false;
+
+              argument.attachmentTypes.forEach((type) => {
+                if (a.proxyURL.endsWith(type)) accepted = true;
+              });
+
+              return accepted;
+            });
+
+            if (attach.size === 0 && argument.optional) return flags;
+            else if (attach.size === 0)
+              return { invalid: true, prompt: argument.prompt };
+
+            flags[argument.id] = attach.first();
+            break;
+
+          case "TIME":
+            time = msgArgs
+              .slice(counter)
+              .join("")
+              .match(/(\d*)(\D*)/g);
+            // @ts-ignore
+            time.pop();
+
+            num = 0;
+            // @ts-ignore
+            for (let i = 0; i < time.length; i++) {
+              try {
+                // @ts-ignore
+                num += ms(time[i]);
+              } catch (e) {
+                return { invalid: true, prompt: argument.prompt };
+              }
+            }
+
+            if (argument.min && num < argument.min)
+              return { invalid: true, prompt: argument.prompt };
+
+            if (argument.max && num > argument.max)
+              return { invalid: true, prompt: argument.prompt };
+
+            flags[argument.id] = num;
+            break;
+
+          default:
+            this.logger.warn(
+              //@ts-ignore
+              `processArguments: the argument type '${argument.type}' doesn't exist.`,
+              __dirname,
+              { tag: "PROCESS_ARGUMENTS" }
+            );
+        }
+
+        counter++;
+      }
+    }
+    return flags;
   }
 }
 

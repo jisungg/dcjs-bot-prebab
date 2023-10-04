@@ -1,5 +1,5 @@
 # PREFAB
-This is an *experimental* bot written in Discord.js v14. Note that this is does not incorporate slash commands
+This is an bot prefab/template written in Discord.js v14. Note that this is does not incorporate slash commands
 
 ## Installation
 ### Requirements

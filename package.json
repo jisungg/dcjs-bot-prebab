@@ -1,7 +1,7 @@
 {
-  "name": "prof",
+  "name": "PREFAB",
   "version": "1.0.0",
-  "description": "A multifunctional Discord bot written in Discord.js v14 that revolves around social profiles and creating your own profile.",
+  "description": "This is an *experimental* bot written in Discord.js v14. Note that this is does not incorporate slash commands.",
   "main": "src/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"

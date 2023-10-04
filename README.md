@@ -1,10 +1,5 @@
-# PROF
-**PROF** is an *experimental* bot written in Discord.js v14. 
-
-## Features
-- Multi-guild centered
-- Profile option using visually appealing backgrounds and profile pictures
-- Share profiles and make friends
+# PREFAB
+This is an *experimental* bot written in Discord.js v14. Note that this is does not incorporate slash commands
 
 ## Installation
 ### Requirements
